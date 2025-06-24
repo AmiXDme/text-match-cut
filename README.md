@@ -129,3 +129,4 @@ Contributions are welcome! Please feel free to submit a pull request or open an 
 *   Inspired by kinetic typography and text-based video effects.
 *   Uses the powerful Mistral AI and Gemini AI models for creative text generation.
 *   Inspired by https://github.com/lrdcxdes/text-match-cut
+*   My YouTube channel: [@AmiXDme](https://www.youtube.com/@AmiXDme)
