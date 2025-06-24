@@ -12,26 +12,40 @@ from dotenv import load_dotenv
 from flask import Flask, request, render_template, send_from_directory, url_for, flash, redirect
 from moviepy import ImageSequenceClip  # Use .editor for newer moviepy versions
 
-# --- Mistral AI Integration ---
+# --- AI Integrations ---
 MISTRAL_AVAILABLE = False
 MISTRAL_API_KEY = None
+GEMINI_AVAILABLE = False
+GEMINI_API_KEY = None
 try:
-    # --- Mistral AI Integration ---
     from mistralai import UserMessage, SystemMessage, Mistral
-
-    load_dotenv() # Load environment variables from .env file
+    load_dotenv()
     MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
     if MISTRAL_API_KEY:
         MISTRAL_AVAILABLE = True
     else:
-        print("Warning: MISTRAL_API_KEY not found in environment variables. AI disabled.")
+        print("Warning: MISTRAL_API_KEY not found in environment variables. Mistral AI disabled.")
 except ImportError:
     UserMessage = None
     Mistral = None
     print("Warning: Mistral AI library not found. AI text generation disabled.")
-    print("Install it using: pip install mistralai python-dotenv")
 except Exception as _:
     print(f"Warning: Error initializing Mistral AI: {_}. AI disabled.")
+
+try:
+    import google.generativeai as genai
+    load_dotenv()
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+    if GEMINI_API_KEY:
+        GEMINI_AVAILABLE = True
+        genai.configure(api_key=GEMINI_API_KEY)
+    else:
+        print("Warning: GEMINI_API_KEY not found in environment variables. Gemini AI disabled.")
+except ImportError:
+    genai = None
+    print("Warning: Gemini AI library not found. Gemini text generation disabled.")
+except Exception as _:
+    print(f"Warning: Error initializing Gemini AI: {_}. Gemini AI disabled.")
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -183,6 +197,41 @@ def generate_ai_text_snippet(client, model, highlighted_text, min_lines, max_lin
     except Exception as e:
         print(f"An unexpected error occurred during AI text generation: {e}")
         return None, -1  # Indicate failure
+
+# Gemini AI Text Generation Function
+def generate_gemini_text_snippet(highlighted_text, min_lines, max_lines):
+    """Generates a text snippet using Gemini AI containing the highlighted text."""
+    if not GEMINI_AVAILABLE:
+        return None, -1
+    target_lines = random.randint(min_lines, max_lines)
+    prompt = (
+        f"Generate a text block of approximately {target_lines} distinct lines (at least {min_lines}). "
+        f"One of the lines MUST contain the exact phrase: '{highlighted_text}'. "
+        f"The surrounding text should be thematically related to '{highlighted_text}' (e.g., fantasy, power, dragons, leadership). "
+        f"Ensure the phrase '{highlighted_text}' fits naturally within its line. "
+        f"Format the output ONLY as the text lines, each separated by a single newline character. Do not add any extra explanations or formatting."
+    )
+    try:
+        # Use Gemini 2.5 Flash model
+        model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
+        response = model.generate_content(prompt)
+        content = response.text.strip()
+        lines = [line for line in content.split('\n') if line.strip()]
+        if len(lines) < min_lines:
+            print(f"Warning: Gemini returned only {len(lines)} valid lines (minimum requested: {min_lines}). Retrying generation.")
+            return None, -1
+        highlight_line_index = -1
+        for i, line in enumerate(lines):
+            if highlighted_text in line:
+                highlight_line_index = i
+                break
+        if highlight_line_index == -1:
+            print(f"Warning: Gemini response did not contain the exact phrase '{highlighted_text}'.")
+            return None, -1
+        return lines, highlight_line_index
+    except Exception as e:
+        print(f"An unexpected error occurred during Gemini text generation: {e}")
+        return None, -1
 
 def create_radial_blur_mask(width, height, center_x, center_y, sharp_radius, fade_radius):
     """Creates a grayscale mask for radial blur (sharp center, fades out)."""
@@ -413,6 +462,7 @@ def generate_video(params):
     blur_type = params['blur_type']
     blur_radius = params['blur_radius']
     ai_enabled = params['ai_enabled']
+    ai_provider = params.get('ai_provider', 'mistral')  # 'mistral', 'gemini', or 'random'
     font_dir = app.config['FONT_DIR'] # Use font dir from Flask config
 
     # Hardcoded or derived settings from original script
@@ -427,16 +477,24 @@ def generate_video(params):
     print(f"Starting video generation with params: {params}")
 
     mistral_client = None
-    if ai_enabled and MISTRAL_AVAILABLE:
-        try:
-            mistral_client = Mistral(api_key=MISTRAL_API_KEY)
-            print("Mistral AI client initialized.")
-        except Exception as e:
-            print(f"Error initializing Mistral client: {e}. Disabling AI for this request.")
-            ai_enabled = False # Disable AI if client fails
-    elif ai_enabled and not MISTRAL_AVAILABLE:
-        print("AI was requested but is not available (check API key/library). Using random text.")
-        ai_enabled = False
+    use_gemini = False
+    if ai_enabled:
+        if ai_provider == 'gemini' and GEMINI_AVAILABLE:
+            use_gemini = True
+            print("Gemini AI selected and available.")
+        elif ai_provider == 'mistral' and MISTRAL_AVAILABLE:
+            try:
+                mistral_client = Mistral(api_key=MISTRAL_API_KEY)
+                print("Mistral AI client initialized.")
+            except Exception as e:
+                print(f"Error initializing Mistral client: {e}. Disabling AI for this request.")
+                ai_enabled = False
+        elif ai_provider == 'gemini' and not GEMINI_AVAILABLE:
+            print("Gemini AI was requested but is not available. Falling back to random text.")
+            ai_enabled = False
+        elif ai_provider == 'mistral' and not MISTRAL_AVAILABLE:
+            print("Mistral AI was requested but is not available. Falling back to random text.")
+            ai_enabled = False
 
     # --- Font Discovery ---
     font_paths = []
@@ -469,20 +527,29 @@ def generate_video(params):
 
     while len(text_snippets_pool) < unique_text_count and generation_attempts < max_generation_attempts:
         generation_attempts += 1
-        if ai_enabled and mistral_client:
-            print(f"  Attempting AI generation ({generation_attempts})...")
+        if ai_enabled and use_gemini:
+            print(f"  Attempting Gemini generation ({generation_attempts})...")
+            lines, hl_index = generate_gemini_text_snippet(highlighted_text, min_lines, max_lines)
+            if lines is None or hl_index == -1:
+                print("    Gemini generation failed or invalid. Will retry or use random.")
+                time.sleep(0.5)
+                if generation_attempts > max_generation_attempts // 2:
+                    print("    Gemini failed repeatedly, falling back to random for this snippet.")
+                    lines, hl_index = generate_random_text_snippet(highlighted_text, min_lines, max_lines)
+            else:
+                print(f"    Gemini snippet generated ({len(lines)} lines).")
+        elif ai_enabled and mistral_client:
+            print(f"  Attempting Mistral generation ({generation_attempts})...")
             lines, hl_index = generate_ai_text_snippet(mistral_client, mistral_model, highlighted_text, min_lines, max_lines)
             if lines is None or hl_index == -1:
-                 print("    AI generation failed or invalid. Will retry or use random.")
-                 time.sleep(0.5) # Small delay before retry
-                 # Fallback to random if AI keeps failing near the end
-                 if generation_attempts > max_generation_attempts // 2:
-                     print("    AI failed repeatedly, falling back to random for this snippet.")
-                     lines, hl_index = generate_random_text_snippet(highlighted_text, min_lines, max_lines)
+                print("    Mistral generation failed or invalid. Will retry or use random.")
+                time.sleep(0.5)
+                if generation_attempts > max_generation_attempts // 2:
+                    print("    Mistral failed repeatedly, falling back to random for this snippet.")
+                    lines, hl_index = generate_random_text_snippet(highlighted_text, min_lines, max_lines)
             else:
-                print(f"    AI snippet generated ({len(lines)} lines).")
-
-        else: # Use random if AI disabled or failed fallback
+                print(f"    Mistral snippet generated ({len(lines)} lines).")
+        else:
             print("  Generating random text snippet...")
             lines, hl_index = generate_random_text_snippet(highlighted_text, min_lines, max_lines)
 
@@ -641,13 +708,17 @@ def generate_video(params):
 @app.route('/', methods=['GET'])
 def index():
     """Renders the main form page."""
-    # Pass mistral availability to the template
-    return render_template('index.html', mistral_available=MISTRAL_AVAILABLE)
+    return render_template(
+        'index.html',
+        mistral_available=MISTRAL_AVAILABLE,
+        gemini_available=GEMINI_AVAILABLE
+    )
 
 @app.route('/generate', methods=['POST'])
 def generate():
     """Handles form submission, triggers video generation."""
     try:
+        ai_provider = request.form.get('ai_provider', 'mistral')
         params = {
             'width': request.form.get('width', default=1024, type=int),
             'height': request.form.get('height', default=1024, type=int),
@@ -659,7 +730,8 @@ def generate():
             'background_color': request.form.get('background_color', default='#FFFFFF'),
             'blur_type': request.form.get('blur_type', default='gaussian'),
             'blur_radius': request.form.get('blur_radius', default=4.0, type=float),
-            'ai_enabled': request.form.get('ai_enabled') == 'true' and MISTRAL_AVAILABLE, # Only enable if checkbox checked AND available
+            'ai_enabled': request.form.get('ai_enabled') == 'true' and (MISTRAL_AVAILABLE or GEMINI_AVAILABLE),
+            'ai_provider': ai_provider,
         }
 
         # Basic Input Validation (Example)
@@ -682,15 +754,15 @@ def generate():
 
         if error:
             # Render index page again, displaying the error
-            return render_template('index.html', error=error, mistral_available=MISTRAL_AVAILABLE)
+            return render_template('index.html', error=error, mistral_available=MISTRAL_AVAILABLE, gemini_available=GEMINI_AVAILABLE)
         else:
             # Render index page again, providing the download link
-            return render_template('index.html', filename=generated_filename, mistral_available=MISTRAL_AVAILABLE)
+            return render_template('index.html', filename=generated_filename, mistral_available=MISTRAL_AVAILABLE, gemini_available=GEMINI_AVAILABLE)
 
     except Exception as e:
         print(f"An unexpected error occurred in /generate route: {e}")
         traceback.print_exc()
-        return render_template('index.html', error=f"An unexpected server error occurred: {e}", mistral_available=MISTRAL_AVAILABLE)
+        return render_template('index.html', error=f"An unexpected server error occurred: {e}", mistral_available=MISTRAL_AVAILABLE, gemini_available=GEMINI_AVAILABLE)
 
 
 @app.route('/output/<filename>')
@@ -710,6 +782,7 @@ def download_file(filename):
 # --- Main Execution ---
 if __name__ == '__main__':
     print(f"Mistral AI Available: {MISTRAL_AVAILABLE}")
+    print(f"Gemini AI Available: {GEMINI_AVAILABLE}")
     # Use host='0.0.0.0' to make accessible on your network (use with caution)
     # debug=True automatically reloads on code changes, but disable for production
     app.run(debug=True, host='127.0.0.1', port=5000)

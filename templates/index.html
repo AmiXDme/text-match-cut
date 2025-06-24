@@ -92,12 +92,30 @@
         </div>
 
         <div class="form-group">
-            <label for="ai_enabled">Use Mistral AI for Text Generation?</label>
-            <input type="checkbox" id="ai_enabled" name="ai_enabled" value="true" {% if mistral_available %}checked{% endif %} {% if not mistral_available %}disabled{% endif %}>
-            {% if not mistral_available %}
-                <small>(MistralAI library not found or API key missing - Random text will be used)</small>
+            <label for="ai_enabled">Use AI for Text Generation?</label>
+            <input type="checkbox" id="ai_enabled" name="ai_enabled" value="true"
+                {% if mistral_available or gemini_available %}checked{% endif %}
+                {% if not mistral_available and not gemini_available %}disabled{% endif %}>
+            {% if not mistral_available and not gemini_available %}
+                <small>(No AI library or API key found - Random text will be used)</small>
             {% endif %}
-         </div>
+        </div>
+        <div class="form-group">
+            <label for="ai_provider">AI Provider:</label>
+            <select id="ai_provider" name="ai_provider"
+                {% if not mistral_available and not gemini_available %}disabled{% endif %}>
+                {% if mistral_available %}
+                    <option value="mistral" selected>Mistral</option>
+                {% endif %}
+                {% if gemini_available %}
+                    <option value="gemini" {% if not mistral_available and gemini_available %}selected{% endif %}>Gemini</option>
+                {% endif %}
+                <option value="random" {% if not mistral_available and not gemini_available %}selected{% endif %}>Random</option>
+            </select>
+            {% if not mistral_available and not gemini_available %}
+                <small>(No AI available, random text only)</small>
+            {% endif %}
+        </div>
 
         <button type="submit" id="generateButton">Generate Video</button>
     </form>
